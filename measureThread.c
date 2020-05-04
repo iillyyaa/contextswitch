@@ -66,9 +66,35 @@ void measureSwitch2(register int array_size, register int stride,
 
 }
 
+/** Args that need to be shared between threads **/
+typedef struct {
+    int array_size;
+    int stride;
+    int p1[2];
+    int p2[2];
+} args_t;
+
+void* measureSwitch1ThreadStart(void* vargs)
+{
+    args_t *args = (args_t*)vargs;
+    double* f = (double*) malloc(args->array_size*sizeof(double));
+    char message;
+    if (f==NULL) {
+        perror("malloc fails");
+        exit (1);
+    }
+    memset((void *)f, 0x00, args->array_size*sizeof(double));
+    measureSwitch1(args->array_size, args->stride, args->p1, args->p2, &message, f);
+    sleep(1);
+    memdump(f, sizeof(double)*args->array_size);
+    free(f);
+    pthread_exit(NULL);
+}
+
 int main(int argc, char *argv[])
 {
-    int i, j, len, ret, p1[2], p2[2], stride=0, array_size=0;
+    int i, j, len, ret;
+    args_t args;
     double *f, start_time, time1, min2=LARGE;
     char message, ch;
     short round;
@@ -94,12 +120,12 @@ int main(int argc, char *argv[])
     while ((ch = getopt(argc, argv, "s:n:")) != EOF) {
         switch (ch) {
             case 'n': /* number of doubles in the array */
-                array_size=atoi(optarg);
-                array_size=array_size/sizeof(double);
+                args.array_size=atoi(optarg);
+                args.array_size=args.array_size/sizeof(double);
                 break;
             case 's': 
-		stride=atoi(optarg);
-		stride=stride/sizeof(double);
+		args.stride=atoi(optarg);
+		args.stride=args.stride/sizeof(double);
                 break;
             default:
                 fprintf(stderr, "Unknown option character.\n");
@@ -107,68 +133,59 @@ int main(int argc, char *argv[])
                 exit(1);
         }
     }
-    if (stride > array_size){
+    if (args.stride > args.array_size){
         printf("Warning: stride is bigger than array_size. "
                "Sequential access. \n");
     }
 
     /* create two pipes: p1[0], p2[0] for read; p1[1], p2[1] for write */
-    if (pipe (p1) < 0) {
+    if (pipe (args.p1) < 0) {
         perror ("create pipe1");
         return -1;
     }
-    if (pipe (p2) < 0) {
+    if (pipe (args.p2) < 0) {
         perror ("create pipe2");
         return -1;
     }
-    /* communicate between two processes */
+    /* communicate between two threads */
     // fork
     printf("time2 with context swith: \t");
     fflush(stdout);
     for(round=0; round<N; round++){
 	
 	flushCache();
-        if ((pid = fork()) <0) {
-            perror("fork");
-            return -1;
-        } else if (pid ==0) {
-        // child process
-            f = (double*) malloc(array_size*sizeof(double));
+        pthread_t tid;
+        int s = pthread_create(&tid, NULL, &measureSwitch1ThreadStart, &args);
+        if (s < 0) {
+            perror("malloc fails");
+            exit (1);
+        }
+            
+        {
+            // parent thread
+            f = (double*) malloc(args.array_size*sizeof(double));
             if (f==NULL) {
                 perror("malloc fails");
                 exit (1);
             }
-	    memset((void *)f, 0x00, array_size*sizeof(double));
-            measureSwitch1(array_size, stride, p1, p2, &message, f);
-	    sleep(1);
-            memdump(f, sizeof(double)*array_size);
-            free(f);
-	    exit(0);
-        } else {
-            // parent process
-            f = (double*) malloc(array_size*sizeof(double));
-            if (f==NULL) {
-                perror("malloc fails");
-                exit (1);
-            }
-	    memset((void *)f, 0x00, array_size*sizeof(double));
+	    memset((void *)f, 0x00, args.array_size*sizeof(double));
 	    sleep(1);
             start_time = gethrtime_x86();
-            measureSwitch2(array_size, stride, p1, p2, &message, f);
+            measureSwitch2(args.array_size, args.stride, args.p1, args.p2, &message, f);
             time1 = gethrtime_x86()-start_time;
 	    time1 = time1/(2*LOOP)*MILLION;
             if(min2 > time1)
                 min2 = time1;
             printf("%f\t", time1);
             fflush(stdout);
-            waitpid(pid, NULL, 0);
-            memdump(f, sizeof(double)*array_size);
+            pthread_join(tid, NULL);
+            memdump(f, sizeof(double)*args.array_size);
             free(f);
         }
 	sleep(1);
     }
     printf("\nmeasureSwitch: array_size = %lu, stride = %d, min time2 = %.15f\n", 
-	array_size*sizeof(double), stride*sizeof(double), min2);
+       args.array_size*sizeof(double), (int)(args.stride*sizeof(double)), min2);
     return 0;
 }
 
